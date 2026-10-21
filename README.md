@@ -1,411 +1,448 @@
-# Documentation complète : benchmark `std::vector` vs `std::list` (vs `std::deque`)
+📊 Benchmark std::vector vs std::list (vs std::deque)
+<div align="center">
+Documentation technique complète
 
-Auteur du code d'origine : Baptiste Wicht (licence MIT) — fichier `bench.cpp`.
-Document de référence pour l'analyse : article « Performance of vector vs list » (mesures sur Intel Core i7 Q820 @ 1,73 GHz, GCC 4.7.2, `-O2 -march=native -std=c++11`).
+Auteur du code d'origine : Baptiste Wicht (licence MIT) — fichier bench.cpp
 
-> **Avertissements de lecture (à lire avant le reste)**
-> 1. `bench.cpp` dépend de `bench.hpp` et `policies.hpp`, qui n'ont **pas** été fournis. Le comportement des politiques (`FillBack`, `Find`, `Insert`, etc.) est donc **déduit de leurs noms, de la structure du code et de l'article**. Ces passages sont signalés par « (déduit) ».
-> 2. Les chiffres cités viennent de **l'article** (ancienne version du benchmark, matériel de 2010, tailles de collections différentes de celles de `bench.cpp` actuel). Ils servent à illustrer les ordres de grandeur et les tendances, pas à prédire vos propres mesures.
-> 3. Certains tableaux de l'article sont manifestement mal étiquetés (voir section 8). Je ne les utilise pas pour tirer de conclusions.
+Référence : article « Performance of vector vs list »
 
----
+Matériel de référence : Intel Core i7 Q820 @ 1,73 GHz · GCC 4.7.2 · -O2 -march=native -std=c++11
 
-## Table des matières
+</div>
+⚠️ Avertissements de lecture
+1. bench.cpp dépend de bench.hpp et policies.hpp, non fournis. Le comportement des politiques (FillBack, Find, Insert, etc.) est déduit de leurs noms, de la structure du code et de l'article. Ces passages sont signalés par « (déduit) ».
 
-1. Problématique et objectif
-2. Théorie : complexité vs réalité matérielle
-3. Architecture du projet
-4. Le code de `bench.cpp`, pas à pas
-5. Les benchmarks, un par un (théorie, pratique, résultats)
-6. Tableau comparatif global
-7. Guide de décision
-8. Limites, erreurs et pièges de la méthodologie
-9. Compiler, exécuter, reproduire
-10. Conclusion
+2. Les chiffres cités viennent de l'article (ancienne version du benchmark, matériel de 2010, tailles différentes de bench.cpp actuel). Ils illustrent des ordres de grandeur et tendances, pas vos propres mesures.
 
----
+3. Certains tableaux de l'article sont mal étiquetés (voir §8). Ils ne sont pas utilisés pour conclure.
 
-## 1. Problématique et objectif
+🗂️ Sommaire
+#	Section	#	Section
+1	Problématique et objectif	6	Tableau comparatif global
+2	Théorie : complexité vs réalité	7	Guide de décision
+3	Architecture du projet	8	Limites et pièges
+4	Le code pas à pas	9	Compiler & reproduire
+5	Les benchmarks un par un	10	Conclusion
+🎯 1. Problématique et objectif
+En C++, std::vector et std::list sont les deux conteneurs séquentiels les plus connus. La sagesse populaire dit :
 
-En C++, `std::vector` et `std::list` sont les deux conteneurs séquentiels les plus connus. La sagesse populaire dit :
+Conteneur	Usage recommandé
+🟦 list	Insertions/suppressions au milieu — O(1) une fois l'itérateur connu
+🟩 vector	Tout le reste
+❓ Question centrale
 
-- **`list`** pour les insertions/suppressions au milieu (O(1) une fois l'itérateur connu) ;
-- **`vector`** pour tout le reste.
+Dans la pratique, sur du matériel moderne, pour quelles charges de travail et quelles tailles d'éléments list est-il réellement meilleur que vector ?
 
-Or la complexité asymptotique ignore le **coût réel d'accès à la mémoire**. Le benchmark répond à la question :
+La version actuelle du code ajoute std::deque comme troisième concurrent et teste des types d'éléments variés :
 
-> Dans la pratique, sur du matériel moderne, pour quelles charges de travail et quelles tailles d'éléments `list` est-il réellement meilleur que `vector` ?
+triviaux de 8 octets à 4 Ko ;
 
-La version actuelle du code ajoute `std::deque` comme troisième concurrent, et teste des types d'éléments variés (trivials de 8 octets à 4 Ko, types non triviaux avec `std::string`, déplaçables ou non, `noexcept` ou non).
+types non triviaux avec std::string ;
 
----
+déplaçables ou non ;
 
-## 2. Théorie : complexité vs réalité matérielle
+noexcept ou non.
 
-### 2.1 Complexités théoriques
+🧠 2. Théorie : complexité vs réalité matérielle
+2.1 Complexités théoriques
+Opération	vector	list	deque
+push_back	O(1) amorti	O(1)	O(1)
+push_front	O(n)	O(1)	O(1)
+Accès par indice	O(1)	O(n)	O(1)
+Recherche linéaire	O(n)	O(n)	O(n)
+Insertion/suppression milieu (itérateur connu)	O(n)	O(1)	O(n)
+Tri	O(n log n)	O(n log n)	O(n log n)
+Destruction	O(n) si non trivial, sinon ~O(1)	O(n) (un delete/nœud)	O(n) par blocs
+Sur le papier, la recherche est équivalente et list gagne sur l'insertion. C'est ce que le benchmark remet en cause.
 
-| Opération | `vector` | `list` | `deque` |
-|---|---|---|---|
-| `push_back` | O(1) amorti | O(1) | O(1) |
-| `push_front` | O(n) | O(1) | O(1) |
-| Accès par indice | O(1) | O(n) | O(1) |
-| Recherche linéaire | O(n) | O(n) | O(n) |
-| Insertion/suppression au milieu (itérateur connu) | O(n) | O(1) | O(n) |
-| Tri | O(n log n) | O(n log n) | O(n log n) |
-| Destruction | O(n) si destructeur non trivial, sinon ~O(1) | O(n) (un `delete` par nœud) | O(n) / par blocs |
+2.2 Les trois facteurs qui font dérailler la théorie
+<table> <tr> <td width="33%" valign="top">
+🚀 a) Cache CPU & localité
+Le processeur charge une ligne entière (64 octets) à chaque accès.
 
-Sur le papier, la recherche est équivalente et `list` gagne sur l'insertion. C'est ce que le benchmark remet en cause.
+vector : contigu → prefetching, cache hits gratuits.
 
-### 2.2 Les trois facteurs qui font dérailler la théorie
+list : nœuds éparpillés → cache miss à chaque saut (~100 cycles vs ~4 en L1).
 
-**a) Le cache CPU et la localité spatiale.**
-Quand le processeur lit une adresse, il charge une **ligne de cache entière** (typiquement 64 octets). Dans un `vector`, les éléments sont contigus : lire l'élément *i* amène gratuitement les éléments suivants dans le cache, et le *prefetcher* matériel anticipe le parcours. Dans une `list`, chaque nœud est alloué séparément : chaque saut de pointeur est potentiellement un **cache miss** (accès à la RAM, ordre de 100 cycles ou plus, contre ~4 pour le cache L1).
+</td> <td width="33%" valign="top">
+💰 b) Coût d'allocation
+list : 1 allocation par élément + 16 octets de surcharge (prev/next en 64 bits).
 
-**b) Le coût de l'allocation.**
-`list` fait **une allocation par élément** (nœud = élément + 2 pointeurs `prev`/`next`, soit 16 octets de surcharge en 64 bits). `vector` alloue rarement (croissance géométrique), donc en amorti beaucoup moins.
+vector : croissance géométrique → allocations rares et amorties.
 
-**c) La taille et la nature de l'élément.**
-Déplacer un élément dans un `vector` (décalage lors d'une insertion, échange lors d'un tri) coûte proportionnellement à sa taille (ou à son coût de déplacement pour un type non trivial). Dans une `list`, l'élément ne bouge jamais : seuls des pointeurs sont modifiés. Plus l'élément est gros ou cher à copier, plus `list` regagne du terrain.
+</td> <td width="33%" valign="top">
+📦 c) Taille de l'élément
+vector : déplacer un élément coûte proportionnel à sa taille.
 
-Ces trois facteurs s'opposent : le cache et les allocations favorisent `vector`, le coût de déplacement des gros éléments favorise `list`. Le benchmark mesure le point d'équilibre.
+list : l'élément ne bouge jamais, seuls les pointeurs changent.
 
----
+Plus l'élément est gros → plus list regagne du terrain.
 
-## 3. Architecture du projet
+</td> </tr> </table>
+⚖️ Équilibre
+Ces trois facteurs s'opposent : cache et allocations favorisent vector ; coût de déplacement des gros objets favorise list. Le benchmark mesure le point d'équilibre.
 
-```
-bench.cpp        -> définit les types testés, les benchmarks, et main()
-bench.hpp        -> (non fourni) moteur : bench<>(), bench_types<>(), new_graph<>(), graphs::output()
-policies.hpp     -> (non fourni) politiques : Empty, FilledRandom, FillBack, Find, Insert, ...
-plf_timsort.h    -> inclus, non utilisé dans le fichier fourni
-plf_colony.h     -> inclus, non utilisé dans le fichier fourni
-```
+🏗️ 3. Architecture du projet
+Fichier	Rôle
+📄 bench.cpp	Définit les types testés, les benchmarks, et main()
+⚙️ bench.hpp	(non fourni) Moteur : bench<>(), bench_types<>(), new_graph<>(), graphs::output()
+🎛️ policies.hpp	(non fourni) Politiques : Empty, FilledRandom, FillBack, Find, Insert, …
+📦 plf_timsort.h	Inclus, non utilisé
+📦 plf_colony.h	Inclus, non utilisé
+Design par politiques (policy-based design) : un benchmark = conteneur + unité de temps + politique d'initialisation + politique d'opération.
 
-Le design repose sur des **politiques (policy-based design)** : un benchmark = un conteneur + une unité de temps + une politique d'initialisation + une politique d'opération.
+cpp
+bench<Conteneur, Unite, PolitiqueInit, PolitiqueOperation...>("nom_courbe", taille)
+Exemple concret :
 
-```cpp
-bench<Conteneur, Unité, PolitiqueInit, PolitiqueOpération...>("nom_courbe", tailles);
-```
+cpp
+bench<std::vector<T>, microseconds, Empty, ReserveSize, FillBack>("vector_reserve", sizes)
+Paramètre	Valeur
+Conteneur	std::vector<T>
+Unité	microseconds
+Init	Empty (conteneur vide)
+Opérations	ReserveSize (appelle reserve(n)) → FillBack (push_back × n)
+sizes	Liste des *n* testés
+🔬 4. Le code de bench.cpp, pas à pas
+4.1 Inclusions
+Header	Rôle
+<vector> <list> <deque>	Conteneurs comparés
+<random>	Génération / mélange aléatoire
+<array>	Remplissage des types à taille paramétrée
+<algorithm>	std::find, std::sort, std::remove, …
+<thread> <iostream> <cstdint> <typeinfo> <memory>	Utilitaires moteur (déduit)
+plf_timsort.h plf_colony.h	Inclus, inutilisés
+💡 Remarque — std::string est utilisé sans #include <string>. Cela compile par inclusions transitives, non garanti par le standard.
 
-Exemple : `bench<std::vector<T>, microseconds, Empty, ReserveSize, FillBack>("vector_reserve", sizes)` :
-- conteneur : `std::vector<T>` ;
-- unité : microsecondes ;
-- initialisation : `Empty` (conteneur vide au départ) ;
-- opérations : `ReserveSize` (appelle `reserve(n)` d'abord) puis `FillBack` (ajoute n éléments avec `push_back`) ;
-- `sizes` : liste des valeurs de n testées.
+4.2 Les traits constexpr (vérification d'invariants)
+Ces fonctions alimentent des static_assert : elles garantissent à la compilation que chaque type de test possède les propriétés annoncées. Un benchmark dont les types ne sont pas ce qu'on croit est un benchmark faux.
 
----
+Trait	Vérifie que…
+is_trivial_of_size<T>(size)	T est trivial et sizeof(T) == size
+is_non_trivial_of_size<T>(size)	T non trivial, bonne taille, copiable + déplaçable
+is_non_trivial_nothrow_movable<T>()	Non trivial, constructeur/affectation de déplacement noexcept
+is_non_trivial_non_nothrow_movable<T>()	Non trivial, déplaçable, pas noexcept
+is_non_trivial_non_movable<T>()	Non trivial, copiable, non déplaçable (défini, non utilisé)
+is_small<T>()	sizeof(T) <= sizeof(std::size_t) (8 o) — exclut vector des tests trop lents (§5.3)
+💡 Pourquoi noexcept compte
+Lors d'une réallocation, std::vector utilise std::move_if_noexcept. Si le constructeur de déplacement n'est pas noexcept et qu'un constructeur de copie existe, le vector copie les éléments (garantie forte d'exception). C'est la raison d'être de la paire NonTrivialStringMovable / NonTrivialStringMovableNoExcept.
 
-## 4. Le code de `bench.cpp`, pas à pas
-
-### 4.1 Inclusions
-
-| Header | Rôle |
-|---|---|
-| `<vector>`, `<list>`, `<deque>` | Conteneurs comparés |
-| `<random>` | Génération/mélange aléatoire (utilisé par les politiques) |
-| `<array>` | Remplissage des types de taille paramétrée |
-| `<algorithm>` | `std::find`, `std::sort`, `std::remove`, etc. |
-| `<thread>`, `<iostream>`, `<cstdint>`, `<typeinfo>`, `<memory>` | Utilitaires du moteur (`<memory>` pour les `unique_ptr` de `SmartFilled`/`SmartDelete`, déduit) |
-| `plf_timsort.h`, `plf_colony.h` | Inclus mais **inutilisés** dans ce fichier (reliquat ou extension prévue) |
-
-Remarque : `std::string` est utilisé sans inclure `<string>` explicitement ; cela compile grâce à des inclusions transitives, ce qui n'est pas garanti par le standard.
-
-### 4.2 Les traits `constexpr` (vérification d'invariants)
-
-Ces fonctions servent uniquement aux `static_assert` : elles garantissent à la compilation que chaque type de test possède bien les propriétés annoncées. Un benchmark dont les types ne sont pas ce qu'on croit est un benchmark faux.
-
-| Fonction | Vérifie |
-|---|---|
-| `is_trivial_of_size<T>(size)` | `T` est trivial **et** `sizeof(T) == size` |
-| `is_non_trivial_of_size<T>(size)` | `T` est non trivial, de la bonne taille, copiable et déplaçable (constructeur + affectation) |
-| `is_non_trivial_nothrow_movable<T>()` | Non trivial, constructeur et affectation de déplacement `noexcept` |
-| `is_non_trivial_non_nothrow_movable<T>()` | Non trivial, déplaçable, mais **pas** `noexcept` |
-| `is_non_trivial_non_movable<T>()` | Non trivial, copiable mais non déplaçable (défini, non utilisé ici) |
-| `is_small<T>()` | `sizeof(T) <= sizeof(std::size_t)`, c.-à-d. 8 octets ; sert à exclure `vector` des tests trop lents (voir 5.3) |
-
-Pourquoi `noexcept` compte : lors d'une réallocation, `std::vector` utilise `std::move_if_noexcept`. Si le constructeur de déplacement n'est pas `noexcept` **et** qu'un constructeur de copie existe, le `vector` **copie** les éléments (pour conserver la garantie forte d'exception). C'est la raison d'être de la paire `NonTrivialStringMovable` / `NonTrivialStringMovableNoExcept`.
-
-### 4.3 Les types testés
-
-#### `Trivial<N>` : type trivial de taille N octets
-
-```cpp
+4.3 Les types testés
+4.3.1 Trivial<N> — type trivial de N octets
+cpp
 template<int N>
 struct Trivial {
     std::size_t a;                              // clé de comparaison (8 octets)
-    std::array<unsigned char, N-sizeof(a)> b;   // remplissage pour atteindre N octets
-    bool operator<(const Trivial &other) const { return a < other.a; }
+    std::array<unsigned char, N - sizeof(a)> b; // remplissage pour atteindre N octets
+
+    bool operator<(const Trivial& other) const {
+        return a < other.a;
+    }
 };
-```
-- `a` sert à la comparaison (`operator<`), `b` n'est que du « poids mort » pour atteindre la taille voulue.
-- Spécialisation `Trivial<8>` : sans tableau (un `std::array` de taille 0 serait inutile ici).
-- La copie est un simple `memcpy` : le coût est proportionnel à N, sans surcoût de logique.
+Point	Détail
+🔑 a	Sert à la comparaison (operator<)
+🪨 b	« Poids mort » pour atteindre la taille N
+🔧 Trivial<8>	Spécialisation sans tableau
+📋 Copie	Simple memcpy → coût ∝ N, sans logique
+Instances : TrivialSmall (8 o) · TrivialMedium (32 o) · TrivialLarge (128 o) · TrivialHuge (1 Ko) · TrivialMonster (4 Ko)
 
-Instances : `TrivialSmall` (8 o), `TrivialMedium` (32 o), `TrivialLarge` (128 o), `TrivialHuge` (1 Ko), `TrivialMonster` (4 Ko).
+4.3.2 NonTrivialStringMovable — type avec std::string
+Aspect	Détail
+📏 std::string	> 15 caractères → dépasse le SSO → vraie allocation dynamique à la copie
+⚠️ Destructeur	= default → supprime la génération implicite du déplacement
+🔄 « Déplacement »	Retombe sur la copie (commentaire trompeur « easy to move »)
+✅ static_assert	is_non_trivial_non_nothrow_movable passe (move_constructible via copy, pas nothrow)
+📐 Taille	32 (string) + 8 (a) = 40 octets
+4.3.3 NonTrivialStringMovableNoExcept — déplacement vrai et noexcept
+Constructeur de déplacement noexcept = default
 
-#### `NonTrivialStringMovable` : type avec `std::string`
+Affectation par déplacement noexcept via std::swap
 
-- Contient une `std::string` de plus de 15 caractères, volontairement pour **dépasser le SSO** (Small String Optimization) : copier la chaîne nécessite alors une vraie allocation dynamique, donc c'est coûteux.
-- Destructeur déclaré (`= default`) : **cela supprime la génération implicite du constructeur/opérateur de déplacement**. Le « déplacement » retombe donc sur la **copie**. Le commentaire du code dit « easy to move », mais en réalité ce type est **copié** lors des déplacements. C'est pour cela que le `static_assert` `is_non_trivial_non_nothrow_movable` passe : `is_move_constructible` est vrai (la copie accepte une rvalue) mais pas `nothrow`.
-- Taille typique avec libstdc++ : 32 (string) + 8 (`a`) = 40 octets.
+→ le vector déplace (échange de pointeurs internes) lors des réallocations
 
-#### `NonTrivialStringMovableNoExcept` : même idée, déplacement vrai et `noexcept`
+But : mesurer l'impact de noexcept sur les performances du vector
 
-- Définit explicitement constructeur de déplacement `noexcept = default` et affectation par déplacement `noexcept` (via `std::swap` des membres).
-- Le `vector` peut donc **déplacer** (échange de pointeurs internes de la string) lors des réallocations, au lieu de copier.
-- Permet de mesurer l'impact de `noexcept` sur les performances du `vector`.
+4.3.4 NonTrivialArray<N> — copie coûteuse par la taille
+a (clé) + std::array<unsigned char, N-8> privé
 
-#### `NonTrivialArray<N>` : non trivial, copie coûteuse par la taille
+Non trivial (initialiseur a = 0 + constructeur par défaut)
 
-- `a` (clé) + `std::array<unsigned char, N-8>` privé.
-- Non trivial à cause de l'initialiseur de membre `a = 0` et du constructeur par défaut fourni.
-- Instancié en `NonTrivialArray<32>` (32 octets) : permet de comparer un type non trivial et un type trivial de **même taille** (`TrivialMedium`).
+Instancié en NonTrivialArray<32> → comparable à TrivialMedium (même taille)
 
-### 4.4 Les structures de benchmark
+4.4 Les structures de benchmark
+Chaque bench_xxx<T> est un template struct avec une méthode statique run() :
 
-Chaque `bench_xxx<T>` est un *template struct* avec une méthode statique `run()` :
-1. `new_graph<T>("nom", "unité")` crée un graphique pour ce type et cette opération ;
-2. définit la liste `sizes` ;
-3. appelle `bench<...>` une fois par conteneur/variante.
+new_graph<T>("nom", "unité") — crée un graphique
 
-### 4.5 Orchestration
+Définit la liste sizes
 
-```cpp
+Appelle bench<...> — une fois par conteneur/variante
+
+4.5 Orchestration
+cpp
 template<typename ...Types>
-void bench_all(){
-    bench_types<bench_fill_back, Types...>();   // lance bench_fill_back<T>::run() pour chaque T
-    ...
-    bench_types<bench_number_crunching, TrivialSmall, TrivialMedium>();  // seulement 2 types : trop lent
+void bench_all() {
+    bench_types<bench_fill_back, Types...>();     // lance bench_fill_back<T>::run()
+    // ...
+    bench_types<bench_number_crunching, TrivialSmall, TrivialMedium>();
+    // seule cette ligne pour number_crunching
 }
-```
+Bilan : main() instancie bench_all avec 8 types, puis graphs::output(Output::GOOGLE) génère les graphiques.
 
-`main()` instancie `bench_all` avec 8 types, puis `graphs::output(graphs::Output::GOOGLE)` génère les graphiques (sortie Google Charts, déduit).
+📊 Total : 9 benchmarks × 8 types + 1 benchmark × 2 types = 74 graphiques.
 
-Au total : 9 benchmarks × 8 types + 1 benchmark × 2 types, soit 74 graphiques.
+📈 5. Les benchmarks, un par un
+Les chiffres proviennent de l'article (sauf mention). n = nombre d'éléments.
 
----
+5.1 bench_fill_back — remplissage par push_back
+Code : tailles 100 000 → 1 000 000. Variantes : vector, list, deque, vector_reserve, et trois versions *_inserter.
 
-## 5. Les benchmarks, un par un
+Théorie : vector amorti O(1) mais réalloue ~log₂(n) fois → reserve supprime ces réallocations. list fait *n* allocations. deque alloue par blocs.
 
-Les chiffres ci-dessous proviennent de l'article (sauf mention). `n` = nombre d'éléments.
+Résultats (élément 1 Ko, ms) :
 
-### 5.1 `bench_fill_back` : remplissage par `push_back`
+*n*	vector_pre	vector	list
+1 000	9	11	10
+10 000	122	451	8
+100 000	949	2 635	115
+1 000 000	9 138	23 654	1 270
+Analyse :
 
-**Code** : tailles de 100 000 à 1 000 000. Variantes : `vector`, `list`, `deque`, `vector_reserve` (avec `reserve(n)` préalable), et trois versions avec `std::back_inserter` (`*_inserter`).
+✅ vector avec reserve → le plus rapide (une seule allocation)
 
-**Théorie** : `vector` amorti O(1) mais réalloue et recopie/déplace ~log₂(n) fois. `reserve` supprime ces réallocations. `list` fait n allocations. `deque` alloue par blocs.
+⚠️ Sans reserve, vector est ~2,6× plus lent que vector_pre à 1 Ko
 
-**Pratique et résultats (article, élément de 1 Ko, ms)** :
+💡 À 1 Ko, list bat vector sans reserve (11 270 vs 23 654 ms)
 
-| n | vector_pre | vector | list |
-|---|---|---|---|
-| 1 000 | 0 | 9 | 1 |
-| 10 000 | 12 | 245 | 18 |
-| 100 000 | 949 | 2 635 | 1 153 |
-| 1 000 000 | 9 138 | 23 654 | 11 270 |
+📝 L'article prétend « un ordre de grandeur » entre vector_pre et list → non confirmé par ses propres chiffres (9 138 vs 11 270)
 
-(Ce tableau correspond au graphique 1 024 octets, dont l'axe monte à 25 000 ms.)
+🎯 noexcept : sans lui, les réallocations copient les std::string ; avec lui, elles les déplacent
 
-**Analyse** :
-- `vector` avec `reserve` est le plus rapide : une seule allocation.
-- Sans `reserve`, le `vector` est ~2,6× plus lent que `vector_pre` à 1 Ko, car chaque réallocation recopie de gros éléments.
-- Pour un élément de 1 Ko, `list` est plus rapide que `vector` **sans** `reserve` (11 270 vs 23 654 ms) : la copie lors de la réallocation coûte plus cher que l'allocation par nœud.
-- Note : l'article affirme que `vector_pre` est « un ordre de grandeur plus rapide » que `list` ; ses propres chiffres 1 Ko (9 138 vs 11 270) ne le montrent pas. L'écart est bien plus marqué pour de petits éléments (graphique 8 octets).
-- Les types non triviaux illustrent l'effet de `noexcept` : sans lui, les réallocations **copient** les `std::string` (allocations en cascade) ; avec lui, elles les **déplacent**.
+5.2 bench_emplace_back — emplace_back
+Même scénario que §5.1 avec construction sur place (pas de copie temporaire). Pas de variantes reserve ni inserter. Mesure le gain de la construction directe — surtout visible sur les types non triviaux.
 
-### 5.2 `bench_emplace_back` : `emplace_back`
+5.3 bench_fill_front — insertion en tête
+Code : tailles 10 000 → 100 000 (réduites car très lent). vector testé uniquement si is_small<T>() (types de 8 octets).
 
-Même scénario que 5.1 avec construction sur place (pas de copie temporaire). Pas de variantes `reserve` ni `inserter`. Mesure le gain de la construction directe, surtout visible sur les types non triviaux.
+Théorie : chaque insert(begin(), x) décale tous les éléments → O(n)/insertion → O(n²) total pour vector. O(1) pour list et deque.
 
-### 5.3 `bench_fill_front` : insertion en tête
+Résultats (8 octets, ms) :
 
-**Code** : tailles de 10 000 à 100 000 (réduites car très lent). `vector` n'est testé que si `is_small<T>()`, c.-à-d. pour les types de 8 octets : avec de gros éléments, l'exécution serait interminable.
+*n*	vector	list
+10 000	4	0
+50 000	94	9
+100 000	393	74
+200 000	1 600	393
+300 000	4 239	312
+Analyse : croissance quadratique pour vector (×4 quand *n* double). À 300 000, list est ~3 500× plus rapide. 💥 Pire cas absolu pour vector. → deque = alternative idéale.
 
-**Théorie** : chaque `insert(begin(), x)` décale **tous** les éléments : O(n) par insertion, O(n²) au total pour `vector`. O(1) pour `list` et `deque`.
+5.4 bench_emplace_front — emplace_front
+Variante par construction sur place de §5.3, même restriction is_small<T>(). Conclusions identiques.
 
-**Résultats (article, 8 octets, ms)** :
+5.5 bench_linear_search — recherche linéaire
+Code : tailles 1 000 → 10 000. Init FilledRandom (valeurs [0,N] mélangées). Opération Find : std::find pour chaque nombre (déduit).
 
-| n | vector | list |
-|---|---|---|
-| 10 000 | 40 | 0 |
-| 50 000 | 949 | 2 |
-| 100 000 | 3 937 | 4 |
-| 200 000 | 16 003 | 9 |
-| 300 000 | 42 393 | 12 |
+Théorie : O(n) partout → a priori équivalents. Complexité totale : O(n²).
 
-**Analyse** : croissance quadratique nette pour `vector` (×4 quand n double). À n = 300 000, `list` est ~3 500× plus rapide. C'est le pire cas pour `vector`. `deque`, conçu pour cela, est l'alternative idéale. Aucun intérêt à tester de plus gros éléments : ce serait encore pire.
+Résultats (8 octets, µs) :
 
-### 5.4 `bench_emplace_front` : `emplace_front`
+*n*	vector	list
+1 000	1	11
+1 000	1 545	—
+5 000	35 886	—
+10 000	150 865	—
+20 000	614 496	—
+À 1 Ko : list atteint 3 356 432 µs à *n* = 20 000 ; vector reste proche de 0 à l'échelle du graphique.
 
-Variante par construction sur place de 5.3, avec la même restriction `is_small<T>()` pour `vector`. Conclusions identiques.
+Analyse : 🏆 Cas emblématique de la localité de cache. vector parcouru séquentiellement (lignes de cache + prefetching) ; list éparpillée → enchaîne les cache misses. Écart de plusieurs ordres de grandeur, jamais inversé par la taille.
 
-### 5.5 `bench_linear_search` : recherche linéaire
+5.6 bench_random_insert — insertion à position aléatoire
+Code : tailles 10 000 → 100 000 (ms). Conteneur rempli aléatoirement, puis 1 000 insertions à position aléatoire. Position trouvée par recherche linéaire (O(n) dans les deux cas).
 
-**Code** : tailles de 1 000 à 10 000. Initialisation `FilledRandom` (valeurs [0, N] mélangées). Opération `Find` : chaque nombre de [0, N] est recherché avec `std::find` (déduit).
+Théorie : list gagne sur l'insertion (O(1) vs O(n)) mais la recherche domine → pénalise list.
 
-**Théorie** : O(n) pour tous, donc a priori équivalents. Complexité totale : O(n²) pour chercher les n valeurs.
+Résultats (article, ms, n = 1 000 à 10 000) :
 
-**Résultats (article, 8 octets, µs)** :
+<table> <tr><td width="50%" valign="top">
+🟩 Petits éléments
 
-| n | vector | list |
-|---|---|---|
-| 100 | 0 | 11 |
-| 1 000 | 0 | 1 545 |
-| 5 000 | 0 | 35 886 |
-| 10 000 | 0 | 150 865 |
-| 20 000 | 0 | 614 496 |
+8 o : vector ~7,6× plus rapide (n=10 000)
 
-À 1 Ko : `list` atteint 3 356 432 µs à n = 20 000, `vector` reste proche de 0 à l'échelle du graphique.
+32 o : écart réduit (~3,3×), vector toujours devant
 
-**Analyse** : le cas emblématique de la **localité de cache**. Le `vector` est parcouru séquentiellement (lignes de cache + prefetching) ; la `list`, dont les nœuds sont éparpillés après le mélange, enchaîne des cache misses. L'écart dépasse plusieurs ordres de grandeur, et la taille de l'élément n'inverse jamais la tendance (elle ralentit même les deux, car moins d'éléments tiennent dans une ligne de cache).
+</td><td width="50%" valign="top">
+🟦 Gros éléments
 
-### 5.6 `bench_random_insert` : insertion à position aléatoire
+1 Ko : rapport inversé, list ~14,5× plus rapide
 
-**Code** : tailles de 10 000 à 100 000, unité ms. Conteneur rempli aléatoirement, puis 1 000 insertions à une position aléatoire. **La position est trouvée par recherche linéaire** (O(n) pour les deux), puis suivie de l'insertion.
+Point de croisement : ~64 octets
 
-**Théorie** : `list` gagne sur l'insertion (O(1) vs O(n)), mais la recherche domine et pénalise `list`.
+</td></tr> </table>
+⏱️ Le temps de list varie peu avec la taille de l'élément (seule la recherche dépend de *n*, et il y a peu de recherches)
 
-**Résultats (article, ms, n = 1 000 à 10 000)** :
+🎯 Si l'itérateur est déjà connu (aucune recherche), list gagne nettement plus tôt — seul scénario où son O(1) s'exprime pleinement
 
-| n | vector 8 o | list 8 o | vector 32 o | list 32 o | vector 1 Ko | list 1 Ko |
-|---|---|---|---|---|---|---|
-| 1 000 | 9 | 85 | 27 | 120 | 1 821 | 167 |
-| 10 000 | 14 | 106 | 47 | 155 | 3 308 | 228 |
+5.7 bench_random_remove — suppression à position aléatoire
+Code : même schéma que §5.6 avec politique Erase. Variante vector_rem avec RemoveErase (idiome erase(remove(...)), déduit) — compacte en un seul passage.
 
-**Analyse** :
-- **8 octets** : `vector` ~7,6× plus rapide (n = 10 000). Copier de petits éléments contigus coûte moins que parcourir la liste.
-- **32 octets** : l'écart se réduit (~3,3×) mais `vector` reste devant.
-- **1 Ko** : le rapport s'inverse, `list` ~14,5× plus rapide (n = 10 000). Le décalage de gros éléments devient dominant.
-- Le temps de `list` varie peu avec la taille de l'élément : seule la recherche dépend de n, et il y a peu de recherches (1 000).
-- Le point de croisement se situe vers 64 octets sur la machine de l'auteur.
-- Si l'itérateur était déjà connu (aucune recherche), `list` gagnerait nettement plus tôt : c'est le seul scénario où son O(1) s'exprime pleinement.
+Théorie : symétrique de l'insertion.
 
-### 5.7 `bench_random_remove` : suppression à position aléatoire
+Résultats : comportement identique à l'insertion (petits → vector, gros → list). ⚠️ Tableaux erronés dans l'article (§8) → aucun chiffre cité.
 
-**Code** : même schéma que 5.6 avec la politique `Erase`. Variante supplémentaire `vector_rem` avec `RemoveErase` (idiome `erase(remove(...))`, déduit), qui compacte en un seul passage au lieu de décaler à chaque suppression.
+5.8 bench_sort — tri
+Code : tailles 100 000 → 1 000 000. vector & deque : std::sort ; list : list::sort() (déduit).
 
-**Théorie** : symétrique de l'insertion.
+Théorie : O(n log n) partout. Mais std::sort échange des éléments (≥ 3 copies/échange pour non déplaçable) vs list::sort qui ne relie que des pointeurs.
 
-**Résultats** : l'article affirme que le comportement est le même que pour l'insertion (petits éléments : `vector` gagne ; gros éléments : `list` gagne). **Mais les tableaux de cette section de l'article sont erronés** (voir section 8), je ne cite donc pas de chiffres.
+Résultats (ms) :
 
-### 5.8 `bench_sort` : tri
+*n*	vector (8o)	list (8o)	vector (1Ko)	list (1Ko)
+10 000	2	26	224	50
+100 000	163	684	4 289	1 083
+1 000 000	2 147	15 950	50 973	17 975
+Analyse :
 
-**Code** : tailles de 100 000 à 1 000 000. `vector` et `deque` : `std::sort` ; `list` : `list::sort()` (déduit, d'après l'article).
+🟩 8 o : vector ~7,4× plus rapide à 1M (cache + prédiction de branchement)
 
-**Théorie** : O(n log n) partout. Mais `std::sort` échange des éléments (≥ 3 copies par échange pour un type non déplaçable) alors que `list::sort` ne fait que relier des pointeurs.
+🟦 1 Ko : list ~2,8× plus rapide (aucune copie d'éléments)
 
-**Résultats (article, ms)** :
+🎯 Types non triviaux : déplacement noexcept bon marché → rapproche vector de ses meilleures perfs
 
-| n | vector 8 o | list 8 o | vector 1 Ko | list 1 Ko |
-|---|---|---|---|---|
-| 10 000 | 2 | 26 | 224 | 50 |
-| 100 000 | 163 | 684 | 4 289 | 1 083 |
-| 1 000 000 | 2 147 | 15 950 | 50 973 | 17 975 |
+5.9 bench_destruction — destruction du conteneur
+Code : SmartFilled + SmartDelete (déduit : conteneur via pointeur intelligent, temps de destruction mesuré).
 
-**Analyse** :
-- **8 octets** : `vector` ~7,4× plus rapide à 1 M d'éléments (cache et prédiction de branchement).
-- **1 Ko** : `list` ~2,8× plus rapide, car ses temps varient peu avec la taille (aucune copie d'éléments) alors que ceux du `vector` explosent (copies de 1 Ko).
-- Le benchmark teste aussi les types non triviaux : un déplacement `noexcept` bon marché rapproche `vector` de ses meilleures performances.
+Théorie :
 
-### 5.9 `bench_destruction` : destruction du conteneur
+vector<Trivial> → un seul bloc libéré (quasi gratuit)
 
-**Code** : initialisation `SmartFilled` et opération `SmartDelete` (déduit : conteneur alloué dynamiquement via pointeur intelligent, puis libéré, le temps mesuré étant celui de la destruction).
+list → delete par nœud (*n* libérations)
 
-**Théorie** : `vector<Trivial>` libère un seul bloc (destruction quasi gratuite, pas de destructeurs à appeler). `list` doit appeler `delete` sur chaque nœud (n libérations). Pour les types non triviaux, les destructeurs de `std::string` ajoutent n libérations.
+Types non triviaux → *n* destructeurs std::string en plus
 
-**Résultats** : non fournis dans l'article (non testé dans sa version). Attendu : `vector` ≪ `deque` < `list` pour les types triviaux.
+Résultats : ⚠️ non fournis dans l'article. Attendu : vector ≪ deque < list pour types triviaux.
 
-### 5.10 `bench_number_crunching` : insertion triée (calcul intensif)
+5.10 bench_number_crunching — insertion triée (calcul intensif)
+Code : tailles 10 000 → 100 000, uniquement TrivialSmall & TrivialMedium. Politique RandomSortedInsert : insertion en maintenant trié, position trouvée par parcours.
 
-**Code** : tailles de 10 000 à 100 000, **uniquement** `TrivialSmall` et `TrivialMedium` (trop lent pour le reste). Politique `RandomSortedInsert` : on insère des valeurs aléatoires en maintenant le conteneur trié ; la position est trouvée par parcours, puis on insère.
+Résultats (8 octets, ms) :
 
-**Résultats (article, 8 octets, ms)** :
+*n*	vector	list
+10 000	45	166
+50 000	928	10 665
+100 000	3 753	50 766
+200 000	15 185	231 480
+300 000	34 293	715 892
+Analyse : vector ~21× plus rapide à 300 000, et l'écart se creuse. Parcourir une liste ≫ décaler de petits éléments. 💡 std::lower_bound sur vector (dichotomie, impossible sur list en O(log n)) améliorerait encore.
 
-| n | vector | list |
-|---|---|---|
-| 10 000 | 45 | 166 |
-| 50 000 | 928 | 10 665 |
-| 100 000 | 3 753 | 50 766 |
-| 200 000 | 15 185 | 231 480 |
-| 300 000 | 34 293 | 715 892 |
+🧮 6. Tableau comparatif global
+Charge de travail	Petits (≤ 32 o)	Gros (≥ 1 Ko)	Remarque
+Remplissage push_back	🟩 vector (avec reserve)	🟩 vector + reserve, sinon 🟦 list	L'allocation domine
+Insertion en tête	🟨 deque / 🟦 list	🟨 deque / 🟦 list	vector quadratique
+Recherche linéaire	🟩 vector (×100 → ×1000+)	🟩 vector	Effet de cache
+Insert./suppr. aléatoire + recherche	🟩 vector	🟦 list (~14× à 1 Ko)	Croisement ~64 o
+Tri	🟩 vector (~7×)	🟦 list (~3× à 1 Ko)	list ne copie pas
+Destruction	🟩 vector	🟩 vector (triviaux)	list : *n* libérations
+Insertion triée	🟩 vector (~20×)	—	Parcours coûteux en list
+🧭 7. Guide de décision
+<table> <tr><td width="50%" valign="top">
+✅ Choisir std::vector par défaut
+Toujours commencer par vector.
 
-**Analyse** : `vector` est ~21× plus rapide à n = 300 000 et l'écart se creuse. Parcourir une liste coûte bien plus cher que décaler de petits éléments. Un `std::lower_bound` sur le `vector` (recherche dichotomique, impossible sur `list` en O(log n)) améliorerait encore le résultat.
+Appeler reserve() si taille connue.
 
----
+Types non triviaux → rendre le déplacement noexcept.
 
-## 6. Tableau comparatif global
+Gros objets à réordonner → préférer vector<T*> ou vector d'indices.
 
-| Charge de travail | Petits éléments (≤ 32 o) | Gros éléments (≥ 1 Ko) | Remarque |
-|---|---|---|---|
-| Remplissage `push_back` | `vector` (avec `reserve` idéalement) | `vector` avec `reserve`, sinon `list` possible | L'allocation domine |
-| Insertion en tête | `deque` / `list` | `deque` / `list` | `vector` quadratique |
-| Recherche linéaire | **`vector`** (×100 à ×1000+) | **`vector`** | Effet de cache |
-| Insertion/suppression aléatoire avec recherche | **`vector`** | **`list`** (~14× à 1 Ko) | Croisement vers 64 o |
-| Tri | **`vector`** (~7×) | **`list`** (~3× à 1 Ko) | `list` ne copie pas |
-| Destruction | `vector` | `vector` (types triviaux) | `list` : n libérations |
-| Insertion triée | **`vector`** (~20×) | non testé | Parcours coûteux en `list` |
+</td><td width="50%" valign="top">
+🔀 Changer de conteneur si…
+Insertion/suppression en tête → std::deque (ou list)
 
----
+Insertion/suppression au milieu → list seulement si :
 
-## 7. Guide de décision
+éléments gros (≥ 64 o) ou très coûteux à déplacer ;
 
-1. **Par défaut, `std::vector`.** Appelez `reserve()` si vous connaissez la taille approximative.
-2. **Insertions/suppressions fréquentes en tête** : `std::deque` (ou `list`).
-3. **Insertions/suppressions au milieu** : `list` seulement si les deux conditions suivantes sont réunies :
-   - les éléments sont gros (de l'ordre de 64 octets ou plus) ou très coûteux à déplacer ;
-   - vous détenez **déjà** des itérateurs (pas de recherche linéaire).
-   Sinon `vector` (ou, pour un ensemble trié, un conteneur associatif ou un `vector` trié avec `lower_bound`).
-4. **Gros éléments à réordonner** (tri, permutations) : envisager `list`, ou plus souvent un `vector<T*>` / `vector` d'indices pour éviter de copier les gros objets.
-5. **Types non triviaux** : rendre le constructeur et l'affectation de déplacement `noexcept`, sinon `vector` copie lors des réallocations.
-6. **Toujours mesurer** sur votre matériel et vos données : le point de croisement dépend du cache, de l'allocateur et du compilateur.
+itérateurs déjà détenus (pas de recherche linéaire).
 
----
+Ensemble trié → conteneur associatif ou vector trié + lower_bound.
 
-## 8. Limites, erreurs et pièges de la méthodologie
+</td></tr> </table>
+🎯 Règle d'or
+Toujours mesurer sur votre matériel et vos données. Le point de croisement dépend du cache, de l'allocateur et du compilateur.
 
-**Dans l'article**
-- La section « Random Remove » reprend les tableaux et titres d'autres sections : elle contient un tableau intitulé « Push front (8 bytes) » et un autre intitulé « Sort (8 bytes) », identiques à ceux des sections Push Front et Sort. Les vraies données de suppression sont donc absentes.
-- Le texte sur `fill` annonce « un ordre de grandeur » entre `vector_pre` et `list`, ce que le tableau 1 Ko ne confirme pas (9 138 vs 11 270 ms).
-- Le tableau de remplissage placé sous les deux graphiques ne correspond qu'au cas 1 024 octets.
-- Matériel et compilateur anciens (2010, GCC 4.7.2) : les rapports ont évolué (allocateurs, prefetchers, `-O2` différent).
+⚠️ 8. Limites, erreurs et pièges de la méthodologie
+8.1 Dans l'article
+Problème	Détail
+🔁 Section « Random Remove »	Reprend les tableaux « Push front » et « Sort » → vraies données absentes
+📉 Texte sur fill	Annonce « un ordre de grandeur » non confirmé (9 138 vs 11 270)
+🏷️ Tableau de remplissage	Ne correspond qu'au cas 1 024 octets
+⏳ Matériel/compilateur	2010, GCC 4.7.2 → résultats obsolètes
+8.2 Dans bench.cpp
+📦 plf_timsort.h et plf_colony.h inclus mais non utilisés
 
-**Dans `bench.cpp`**
-- `plf_timsort.h` et `plf_colony.h` sont inclus mais non utilisés dans ce fichier.
-- `<string>` non inclus explicitement.
-- Le commentaire de `NonTrivialStringMovable` (« easy to move ») est trompeur : sans déplacement implicite (destructeur déclaré), c'est une copie.
-- `is_non_trivial_non_movable` est défini mais jamais utilisé.
+📝 <string> non inclus explicitement
 
-**Méthodologiques**
-- Les temps dépendent de la fragmentation du tas : une `list` fraîchement remplie séquentiellement a des nœuds proches en mémoire ; **mélangée** (`FilledRandom`), elle perd cette localité, ce qui est le cas défavorable réaliste.
-- Aucune statistique (moyenne, écart-type, répétitions) n'apparaît dans le code visible ; vérifier dans `bench.hpp`.
-- Un seul compilateur, une seule machine, un seul allocateur.
-- Les résultats pour `n` très grand sortent du cache L2/L3 et peuvent changer de régime.
+🎭 Commentaire « easy to move » de NonTrivialStringMovable trompeur (c'est une copie)
 
----
+🔇 is_non_trivial_non_movable défini mais jamais utilisé
 
-## 9. Compiler, exécuter, reproduire
+8.3 Méthodologiques
+🧩 Fragmentation du tas : une list séquentielle garde la localité ; FilledRandom la détruit (cas défavorable réaliste)
 
-```bash
-# Exemple (adapter les chemins ; bench.hpp, policies.hpp, plf_*.h doivent être présents)
+📊 Pas de statistiques (moyenne, écart-type, répétitions) dans le code visible
+
+🖥️ Un seul compilateur, une machine, un allocateur
+
+📉 Grands *n* → sortent du cache L2/L3 → changement de régime possible
+
+🛠️ 9. Compiler, exécuter, reproduire
+bash
+# Adapter les chemins ; bench.hpp, policies.hpp, plf_*.h doivent être présents
 g++ -std=c++14 -O2 -march=native -pthread bench.cpp -o bench
-./bench > results.html     # la sortie dépend de graphs::output (GOOGLE : page Google Charts)
-```
+./bench > results.html   # sortie selon graphs::output (GOOGLE : page Google Charts)
+<table> <tr><td width="33%" valign="top">
+🔧 Prérequis
+C++11 minimum
 
-Remarques :
-- C++11 minimum ; C++14 recommandé (certains `constexpr` du code utilisent des fonctions de type-traits modernes).
-- Prévoir un temps d'exécution **long** (74 graphiques, tailles jusqu'à 10⁶, `Monster` de 4 Ko × 10⁶ = ~4 Go de mémoire pour certains tests : vérifier la RAM disponible ou réduire les tailles).
-- Pour des mesures fiables : désactiver le mode économie d'énergie, fixer la fréquence CPU, fermer les autres applications, répéter les exécutions.
+C++14 recommandé (constexpr modernes)
 
----
+bench.hpp, policies.hpp, plf_*.h présents
 
-## 10. Conclusion
+</td><td width="33%" valign="top">
+💾 Ressources
+74 graphiques
 
-Le benchmark démontre que **la complexité algorithmique seule est un mauvais guide** :
+Tailles jusqu'à 10⁶
 
-- `vector` domine dès que l'accès mémoire séquentiel compte (recherche, parcours, insertion triée, tri de petits éléments) grâce au cache et au prefetching.
-- `list` ne devient pertinente que quand les éléments sont **volumineux** et qu'on évite les recherches (insertion/suppression au milieu, tri sans copie).
-- `deque` est le bon choix quand on insère aux deux extrémités.
-- Les détails d'implémentation des types (`noexcept`, déplacement, taille, SSO) changent sensiblement les résultats.
+Monster 4 Ko × 10⁶ → ~4 Go RAM (à vérifier ou réduire)
 
-Règle pratique : **commencer par `vector`, mesurer, ne changer que si les mesures le justifient.**
+⏱️ Temps d'exécution long
+
+</td><td width="33%" valign="top">
+🎯 Mesures fiables
+Désactiver l'économie d'énergie
+
+Fixer la fréquence CPU
+
+Fermer les autres applications
+
+Répéter les exécutions
+
+</td></tr> </table>
+🏁 10. Conclusion
+La complexité algorithmique seule est un mauvais guide.
+
+Conteneur	Quand il domine	Pourquoi
+🟩 vector	Accès séquentiel : recherche, parcours, insertion triée, tri de petits éléments	Cache + prefetching
+🟦 list	Éléments volumineux + pas de recherche : insertion/suppression milieu, tri sans copie	Aucune copie d'éléments
+🟨 deque	Insertions aux deux extrémités	Blocs + O(1) aux bornes
+🎭 Les détails d'implémentation des types (noexcept, déplacement, taille, SSO) changent sensiblement les résultats.
+
+💎 Règle pratique finale
+Commencer par vector, mesurer, ne changer que si les mesures le justifient.
+
+<div align="center">
+📄 Documentation générée à partir de bench.cpp — Baptiste Wicht (MIT)
+📚 Référence : article « Performance of vector vs list »
+
+</div>
