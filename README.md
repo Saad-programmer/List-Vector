@@ -3,8 +3,6 @@
 Parcours en largeur (BFS) sur arbre *n*-aire
 Implémentation avec std::queue, validation et mesure de performance
 
-👤 Auteur	Alan
-🎓 Filière	ILISI2 — Virtualisation
 💻 Machine de test	HP EliteBook 850 G8 Notebook PC
 📅 Date	2025
 </div>
