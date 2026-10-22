@@ -1,12 +1,4 @@
-📘 Rapport de Laboratoire Technique
-<div align="center">
-Parcours en largeur (BFS) sur arbre *n*-aire
-Implémentation avec std::queue, validation et mesure de performance
 
-💻 Machine de test	HP EliteBook 850 G8 Notebook PC
-📅 Date	2025
-</div>
-📄 Résumé
 Ce rapport documente l'implémentation et l'évaluation de trois programmes C++ réalisant un parcours en largeur (Breadth-First Search, BFS) sur un arbre *n*-aire. L'objectif est double :
 
 (i) valider la correction de l'algorithme par une analyse pas-à-pas ;
